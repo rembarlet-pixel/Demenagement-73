@@ -114,7 +114,7 @@ function parsePAPListings(items: any[]): RawListing[] {
       codePostal: String(cp),
       adresseRue: item.adresse ?? extractAdresseRue(String(desc)),
       latLng: lat && lng ? { lat: parseFloat(lat), lng: parseFloat(lng) } : undefined,
-      source: 'pap',
+      source: 'pap' as const,
     }
   }).filter(l => l.lien)
 }
