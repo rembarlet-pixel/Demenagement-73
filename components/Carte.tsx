@@ -24,6 +24,7 @@ function formatAge(jours: number): string {
 
 function sourceLabel(s: string): string {
   if (s === 'pap')       return 'PAP.fr'
+  if (s === 'seloger')   return 'SeLoger'
   if (s === 'leboncoin') return 'LeBonCoin'
   return s
 }

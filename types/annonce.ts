@@ -11,7 +11,7 @@ export interface Annonce {
   datePublication: string  // ISO string
   ageJours: number
   lienAnnonce: string
-  source: 'pap' | 'leboncoin' | 'autre'
+  source: 'pap' | 'seloger' | 'leboncoin' | 'autre'
   description?: string
   imageUrl?: string
 }
