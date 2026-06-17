@@ -139,7 +139,7 @@ export async function fetchPAP(): Promise<SourceResult> {
   const debug: SourceResult['debug'] = []
 
   for (const url of PAP_RSS_URLS) {
-    const entry = { url, status: 0, proxyStatus: 0, hasContent: false, rawCount: 0 }
+    const entry: SourceResult['debug'][0] = { url, status: 0, proxyStatus: 0, hasContent: false, rawCount: 0 }
     const { content, proxyStatus, targetStatus } = await fetchViaProxy(url)
     entry.proxyStatus = proxyStatus
     entry.status = targetStatus ?? 0
@@ -167,7 +167,7 @@ export async function fetchPAP(): Promise<SourceResult> {
 const LBC_URL = 'https://www.leboncoin.fr/recherche?category=10&real_estate_type=2&price=max-850&rooms=3&sort_by=time&sort_order=desc'
 
 export async function fetchLBC(): Promise<SourceResult> {
-  const entry = { url: LBC_URL, status: 0, proxyStatus: 0, hasContent: false, rawCount: 0 }
+  const entry: SourceResult['debug'][0] = { url: LBC_URL, status: 0, proxyStatus: 0, hasContent: false, rawCount: 0 }
   const { content, proxyStatus, targetStatus } = await fetchViaProxy(LBC_URL)
   entry.proxyStatus = proxyStatus
   entry.status = targetStatus ?? 0
