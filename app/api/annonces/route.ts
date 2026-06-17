@@ -146,9 +146,9 @@ export async function GET() {
   ])
 
   const debug = {
-    pap:     { raw: papResult.listings.length,     error: papResult.error },
-    seloger: { raw: selogerResult.listings.length, error: selogerResult.error },
-    lbc:     { raw: lbcResult.listings.length,     error: lbcResult.error },
+    pap:     { raw: papResult.listings.length,     urls: papResult.debug },
+    seloger: { raw: selogerResult.listings.length, urls: selogerResult.debug },
+    lbc:     { raw: lbcResult.listings.length,     urls: lbcResult.debug },
   }
 
   const allRaw = [...papResult.listings, ...selogerResult.listings, ...lbcResult.listings]
