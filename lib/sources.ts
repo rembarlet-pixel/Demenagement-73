@@ -1,4 +1,4 @@
-// Sources : parse les pages de résultats HTML (approche __NEXT_DATA__ / JSON embarqué)
+// Sources via allorigins.win (proxy CORS qui contourne les blocages IP cloud)
 
 export interface RawListing {
   id: string
@@ -16,12 +16,16 @@ export interface RawListing {
   source: 'pap' | 'seloger' | 'leboncoin'
 }
 
+export interface SourceResult {
+  listings: RawListing[]
+  debug: { url: string; status: number; proxyStatus?: number; hasContent: boolean; rawCount: number; error?: string }[]
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function extractPrix(text: string): number | undefined {
-  const cleaned = text.replace(/[\s ]/g, '')
-  const matches = [...cleaned.matchAll(/(\d{3,4})(?:€|euros?)/gi)]
-  for (const m of matches) {
+  const cleaned = text.replace(/[\s ]/g, '')
+  for (const m of [...cleaned.matchAll(/(\d{3,4})(?:€|euros?)/gi)]) {
     const n = parseInt(m[1])
     if (n >= 300 && n <= 1200) return n
   }
@@ -39,200 +43,174 @@ function extractVille(text: string): { ville?: string; codePostal?: string } {
   const cpMatch = text.match(/\b(73\d{3})\b/)
   const codePostal = cpMatch?.[1]
   let ville: string | undefined
-
   if (codePostal) {
-    const idx = text.indexOf(codePostal)
-    const before = text.slice(Math.max(0, idx - 60), idx)
-    const m = before.match(/([A-ZÀ-Ÿa-zà-ÿ][A-Za-zÀ-ÿ\s'-]{2,30}?)\s*[-–(]?\s*$/)
-    ville = m?.[1]?.trim()
+    const before = text.slice(Math.max(0, text.indexOf(codePostal) - 60), text.indexOf(codePostal))
+    ville = before.match(/([A-ZÀ-Ÿa-zà-ÿ][A-Za-zÀ-ÿ\s'-]{2,30}?)\s*[-–(]?\s*$/)?.[1]?.trim()
   }
   if (!ville) {
-    const m = text.match(/(?:à|sur|en)\s+([A-ZÀ-Ÿ][A-Za-zÀ-ÿ\s'-]{2,25}?)(?:\s*[-–(]|\s*\d|\s*$)/u)
-    ville = m?.[1]?.trim()
+    ville = text.match(/(?:à|sur|en)\s+([A-ZÀ-Ÿ][A-Za-zÀ-ÿ\s'-]{2,25}?)(?:\s*[-–(]|\s*\d|\s*$)/u)?.[1]?.trim()
   }
   return { ville, codePostal }
 }
 
 function extractAdresseRue(text: string): string | undefined {
-  const m = text.match(/\b\d+[a-z]?\s+(?:rue|avenue|av\.|boulevard|bd\.|chemin|allée|impasse|place|route|résidence)\s+[A-Za-zÀ-ÿ\s'-]{3,40}/i)
-  return m?.[0]?.trim()
+  return text.match(/\b\d+[a-z]?\s+(?:rue|avenue|av\.|boulevard|bd\.|chemin|allée|impasse|place|route|résidence)\s+[A-Za-zÀ-ÿ\s'-]{3,40}/i)?.[0]?.trim()
 }
 
 function parsePubDate(raw: string): string {
   if (!raw) return new Date().toISOString()
-  try { return new Date(raw).toISOString() }
-  catch { return new Date().toISOString() }
+  try { return new Date(raw).toISOString() } catch { return new Date().toISOString() }
 }
 
 function stripHtml(html: string): string {
   return html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim()
 }
 
-const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'fr-FR,fr;q=0.9',
-  'Cache-Control': 'no-cache',
+// ── Proxy allorigins.win ──────────────────────────────────────────────────────
+// Fait la requête depuis ses serveurs (IP non-cloud) → contourne les blocages PAP/LBC
+
+async function fetchViaProxy(targetUrl: string): Promise<{ content: string | null; proxyStatus: number; targetStatus?: number }> {
+  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}&timestamp=${Date.now()}`
+  try {
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(20000) })
+    if (!res.ok) return { content: null, proxyStatus: res.status }
+    const json = await res.json()
+    const content = json.contents ?? null
+    const targetStatus = json.status?.http_code ?? undefined
+    return { content, proxyStatus: res.status, targetStatus }
+  } catch (e: any) {
+    return { content: null, proxyStatus: 0 }
+  }
 }
 
-export interface SourceResult {
-  listings: RawListing[]
-  debug: { url: string; status: number; hasNextData: boolean; rawCount: number; error?: string }[]
-}
+// ── Parser RSS générique ──────────────────────────────────────────────────────
 
-// ── PAP.fr ────────────────────────────────────────────────────────────────────
+function parseRssItems(xml: string, source: 'pap' | 'seloger' | 'leboncoin'): RawListing[] {
+  const results: RawListing[] = []
+  const itemRegex = /<item>([\s\S]*?)<\/item>/g
+  let match: RegExpExecArray | null
 
-// PAP est un site Next.js — on parse leur __NEXT_DATA__
-const PAP_URLS = [
-  'https://www.pap.fr/annonce/locations-appartement-savoie-g384-t_3-p_x_850',
-  'https://www.pap.fr/annonce/locations-appartement-savoie-g73-t_3-p_x_850',
-  'https://www.pap.fr/annonce/locations-appartement-rhone-alpes-savoie-g384-t_3-p_x_850',
-  'https://www.pap.fr/annonce/locations-appartement-t_3-p_x_850?cp=73',
-]
-
-function parsePAPListings(items: any[]): RawListing[] {
-  return items.map((item: any, i: number) => {
-    const titre  = item.titre ?? item.title ?? item.libelle ?? ''
-    const lien   = item.url ? `https://www.pap.fr${item.url}` : (item.lien ?? item.link ?? '')
-    const prix   = item.prix ?? item.loyer ?? item.price ?? extractPrix(titre)
-    const ville  = item.ville ?? item.city ?? item.localisation?.ville ?? ''
-    const cp     = item.codePostal ?? item.cp ?? item.zipCode ?? ''
-    const desc   = item.description ?? item.texte ?? item.body ?? ''
-    const date   = item.dateCreation ?? item.date ?? item.publishedAt ?? item.updatedAt ?? ''
-    const lat    = item.latitude ?? item.lat ?? item.geo?.lat
-    const lng    = item.longitude ?? item.lng ?? item.lon ?? item.geo?.lng
-
-    return {
-      id: `pap-${item.id ?? item.idAnnonce ?? i}`,
-      titre: String(titre).slice(0, 150),
-      lien,
-      description: stripHtml(String(desc)).slice(0, 600),
-      pubDate: parsePubDate(String(date)),
-      prix: prix ? parseInt(String(prix)) : undefined,
-      surface: item.surface ?? item.surfaceHabitable ?? extractSurface(titre + ' ' + desc),
-      ville: String(ville),
-      codePostal: String(cp),
-      adresseRue: item.adresse ?? extractAdresseRue(String(desc)),
-      latLng: lat && lng ? { lat: parseFloat(lat), lng: parseFloat(lng) } : undefined,
-      source: 'pap' as const,
+  while ((match = itemRegex.exec(xml)) !== null) {
+    const block = match[1]
+    const getTag = (tag: string) => {
+      const m = block.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>|([^<]*))<\/${tag}>`))
+      return (m?.[1] ?? m?.[2] ?? '').trim()
     }
-  }).filter(l => l.lien)
+    const getAttr = (tag: string, attr: string) =>
+      block.match(new RegExp(`<${tag}[^>]*${attr}=["']([^"']*)["']`))?.[1] ?? ''
+
+    const titre   = getTag('title')
+    const lien    = getTag('link') || getTag('guid')
+    const desc    = getTag('description')
+    const pubDate = getTag('pubDate') || getTag('dc:date')
+    if (!lien) continue
+
+    const textBrut = `${titre} ${stripHtml(desc)}`
+    const { ville, codePostal } = extractVille(textBrut)
+
+    results.push({
+      id: `${source}-${Buffer.from(lien).toString('base64').slice(0, 16)}`,
+      titre: titre.slice(0, 150),
+      lien,
+      description: stripHtml(desc).slice(0, 600),
+      pubDate: parsePubDate(pubDate),
+      imageUrl: getAttr('enclosure', 'url') || undefined,
+      prix: extractPrix(textBrut),
+      surface: extractSurface(textBrut),
+      ville,
+      codePostal,
+      adresseRue: extractAdresseRue(stripHtml(desc)),
+      source,
+    })
+  }
+  return results
 }
+
+// ── PAP.fr RSS via proxy ──────────────────────────────────────────────────────
+
+const PAP_RSS_URLS = [
+  'https://www.pap.fr/rss/annonces/locations?typebien[]=appartement&nb_pieces[]=3&prixmax=850&departement=73',
+  'https://www.pap.fr/rss/annonces/locations?typebien[]=appartement&nb_pieces[]=3&prixmax=850&cp=73',
+  'https://www.pap.fr/rss/annonces/locations?typebien[]=appartement&prixmax=850&departement=73',
+  'https://www.pap.fr/rss/annonces/locations?annonce[]=34&typebien[]=appartement&nb_pieces[]=3&prixmax=850&departement=73',
+]
 
 export async function fetchPAP(): Promise<SourceResult> {
   const debug: SourceResult['debug'] = []
 
-  for (const url of PAP_URLS) {
-    const entry: SourceResult['debug'][0] = { url, status: 0, hasNextData: false, rawCount: 0 }
-    try {
-      const res = await fetch(url, { headers: BROWSER_HEADERS, signal: AbortSignal.timeout(12000) })
-      entry.status = res.status
-      if (!res.ok) { debug.push(entry); continue }
+  for (const url of PAP_RSS_URLS) {
+    const entry = { url, status: 0, proxyStatus: 0, hasContent: false, rawCount: 0 }
+    const { content, proxyStatus, targetStatus } = await fetchViaProxy(url)
+    entry.proxyStatus = proxyStatus
+    entry.status = targetStatus ?? 0
 
-      const html = await res.text()
-      const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+    if (!content) { debug.push(entry); continue }
+    entry.hasContent = true
 
-      if (!ndMatch) { debug.push(entry); continue }
-      entry.hasNextData = true
-
-      const data = JSON.parse(ndMatch[1])
-      const pp = data?.props?.pageProps
-
-      // Chercher les annonces dans toutes les structures possibles
-      const candidates = [
-        pp?.annonces, pp?.listings, pp?.results, pp?.items, pp?.ads,
-        pp?.searchResults?.annonces, pp?.searchResults?.listings, pp?.searchResults?.ads,
-        pp?.data?.annonces, pp?.data?.listings,
-        data?.props?.initialState?.annonces,
-      ]
-      const items = candidates.find(c => Array.isArray(c) && c.length > 0)
-
-      if (items) {
-        const listings = parsePAPListings(items)
-        entry.rawCount = listings.length
-        debug.push(entry)
-        if (listings.length > 0) return { listings, debug }
-      } else {
-        // Debug : log les clés disponibles pour comprendre la structure
-        entry.error = `Clés pageProps: ${Object.keys(pp ?? {}).join(', ')}`
-        debug.push(entry)
-      }
-    } catch (e: any) {
-      entry.error = e?.message
+    if (!content.includes('<item>')) {
+      entry.error = `Pas d'items RSS (${content.slice(0, 100)})`
       debug.push(entry)
+      continue
     }
+
+    const listings = parseRssItems(content, 'pap')
+    entry.rawCount = listings.length
+    debug.push(entry)
+    if (listings.length > 0) return { listings, debug }
   }
 
   return { listings: [], debug }
 }
 
-// ── LeBonCoin ─────────────────────────────────────────────────────────────────
+// ── LeBonCoin via proxy ───────────────────────────────────────────────────────
 
-const LBC_URLS = [
-  'https://www.leboncoin.fr/recherche?category=10&real_estate_type=2&price=max-850&rooms=3&sort_by=time&sort_order=desc',
-  // Recherche géographique centrée sur la Savoie (fallback)
-  'https://www.leboncoin.fr/recherche?category=10&real_estate_type=2&price=max-850&rooms=3',
-]
+const LBC_URL = 'https://www.leboncoin.fr/recherche?category=10&real_estate_type=2&price=max-850&rooms=3&sort_by=time&sort_order=desc'
 
 export async function fetchLBC(): Promise<SourceResult> {
-  const debug: SourceResult['debug'] = []
+  const entry = { url: LBC_URL, status: 0, proxyStatus: 0, hasContent: false, rawCount: 0 }
+  const { content, proxyStatus, targetStatus } = await fetchViaProxy(LBC_URL)
+  entry.proxyStatus = proxyStatus
+  entry.status = targetStatus ?? 0
 
-  for (const url of LBC_URLS) {
-    const entry: SourceResult['debug'][0] = { url, status: 0, hasNextData: false, rawCount: 0 }
-    try {
-      const res = await fetch(url, {
-        headers: {
-          ...BROWSER_HEADERS,
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Upgrade-Insecure-Requests': '1',
-        },
-        signal: AbortSignal.timeout(12000),
-      })
-      entry.status = res.status
-      if (!res.ok) { debug.push(entry); continue }
+  if (!content) return { listings: [], debug: [{ ...entry, error: 'Proxy sans contenu' }] }
+  entry.hasContent = true
 
-      const html = await res.text()
-      const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
-      if (!ndMatch) { debug.push(entry); continue }
-
-      entry.hasNextData = true
-      const data = JSON.parse(ndMatch[1])
-      const ads: any[] = data?.props?.pageProps?.searchData?.ads ?? []
-      entry.rawCount = ads.length
-
-      const listings: RawListing[] = ads.map((ad: any) => {
-        const surfAttr = (ad.attributes ?? []).find((a: any) => a.key === 'square')
-        return {
-          id: `lbc-${ad.list_id ?? Date.now()}`,
-          titre: (ad.subject ?? '').slice(0, 150),
-          lien: ad.url ? (ad.url.startsWith('http') ? ad.url : `https://www.leboncoin.fr${ad.url}`) : '',
-          description: (ad.body ?? '').slice(0, 600),
-          pubDate: parsePubDate(ad.first_publication_date ?? ad.index_date ?? ''),
-          imageUrl: ad.images?.urls?.[0],
-          prix: ad.price?.[0],
-          surface: surfAttr ? parseInt(surfAttr.value) : extractSurface(ad.subject ?? ''),
-          ville: ad.location?.city ?? undefined,
-          codePostal: ad.location?.zipcode ?? undefined,
-          adresseRue: extractAdresseRue(ad.body ?? ''),
-          latLng: (ad.location?.lat && ad.location?.lng) ? { lat: ad.location.lat, lng: ad.location.lng } : undefined,
-          source: 'leboncoin' as const,
-        }
-      }).filter((l: RawListing) => l.lien)
-
-      debug.push(entry)
-      if (listings.length > 0) return { listings, debug }
-    } catch (e: any) {
-      entry.error = e?.message
-      debug.push(entry)
-    }
+  const ndMatch = content.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+  if (!ndMatch) {
+    return { listings: [], debug: [{ ...entry, error: `Pas de __NEXT_DATA__ (${content.slice(0, 150)})` }] }
   }
 
-  return { listings: [], debug }
+  try {
+    const data = JSON.parse(ndMatch[1])
+    const ads: any[] = data?.props?.pageProps?.searchData?.ads ?? []
+    entry.rawCount = ads.length
+
+    const listings: RawListing[] = ads.map((ad: any) => {
+      const surfAttr = (ad.attributes ?? []).find((a: any) => a.key === 'square')
+      return {
+        id: `lbc-${ad.list_id ?? Date.now()}`,
+        titre: (ad.subject ?? '').slice(0, 150),
+        lien: ad.url ? (ad.url.startsWith('http') ? ad.url : `https://www.leboncoin.fr${ad.url}`) : '',
+        description: (ad.body ?? '').slice(0, 600),
+        pubDate: parsePubDate(ad.first_publication_date ?? ''),
+        imageUrl: ad.images?.urls?.[0],
+        prix: ad.price?.[0],
+        surface: surfAttr ? parseInt(surfAttr.value) : extractSurface(ad.subject ?? ''),
+        ville: ad.location?.city ?? undefined,
+        codePostal: ad.location?.zipcode ?? undefined,
+        adresseRue: extractAdresseRue(ad.body ?? ''),
+        latLng: (ad.location?.lat && ad.location?.lng) ? { lat: ad.location.lat, lng: ad.location.lng } : undefined,
+        source: 'leboncoin' as const,
+      }
+    }).filter((l: RawListing) => !!l.lien)
+
+    return { listings, debug: [entry] }
+  } catch (e: any) {
+    return { listings: [], debug: [{ ...entry, error: `Parse error: ${e?.message}` }] }
+  }
 }
 
-// SeLoger désactivé (URLs incorrectes, à reconfigurer)
+// SeLoger désactivé (bloqé aussi)
 export async function fetchSeLoger(): Promise<SourceResult> {
-  return { listings: [], debug: [{ url: 'désactivé', status: 0, hasNextData: false, rawCount: 0, error: 'URLs à vérifier manuellement' }] }
+  return { listings: [], debug: [] }
 }
