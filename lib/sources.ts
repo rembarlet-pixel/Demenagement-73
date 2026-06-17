@@ -217,7 +217,7 @@ export async function fetchLBC(): Promise<SourceResult> {
           codePostal: ad.location?.zipcode ?? undefined,
           adresseRue: extractAdresseRue(ad.body ?? ''),
           latLng: (ad.location?.lat && ad.location?.lng) ? { lat: ad.location.lat, lng: ad.location.lng } : undefined,
-          source: 'leboncoin',
+          source: 'leboncoin' as const,
         }
       }).filter((l: RawListing) => l.lien)
 
